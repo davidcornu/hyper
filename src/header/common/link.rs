@@ -69,7 +69,7 @@ use header::{Header, Raw};
 #[derive(Clone, PartialEq, Debug)]
 pub struct Link {
     /// A list of the `link-value`s of the Link entity-header.
-    values: Vec<LinkValue>
+    values: Vec<LinkValue>,
 }
 
 /// A single `link-value` of a `Link` header, based on:
@@ -106,7 +106,7 @@ pub struct LinkValue {
     media_type: Option<Mime>,
 
     /// Link Extension: `link-extension`.
-    link_extension: Option<String>
+    link_extensions: Vec<LinkExtension>,
 }
 
 /// A Media Descriptors Enum based on:
@@ -132,7 +132,7 @@ pub enum MediaDesc {
     /// all.
     All,
     /// Unrecognized media descriptor extension.
-    Extension(String)
+    Extension(String),
 }
 
 /// A Link Relation Type Enum based on:
@@ -220,7 +220,13 @@ pub enum RelationType {
     /// working-copy-of.
     WorkingCopyOf,
     /// ext-rel-type.
-    ExtRelType(String)
+    ExtRelType(String),
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub struct LinkExtension {
+    name: String,
+    value: Option<String>,
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -247,7 +253,8 @@ impl Link {
 impl LinkValue {
     /// Create `LinkValue` from URI-Reference.
     pub fn new<T>(uri: T) -> LinkValue
-        where T: Into<Cow<'static, str>> {
+        where T: Into<Cow<'static, str>>
+    {
         LinkValue {
             link: uri.into(),
             rel: None,
@@ -258,7 +265,7 @@ impl LinkValue {
             title: None,
             title_star: None,
             media_type: None,
-            link_extension: None,
+            link_extensions: Vec::new(),
         }
     }
 
@@ -308,11 +315,11 @@ impl LinkValue {
     }
 
     /// Get the `LinkValue`'s `link-extension` parameter.
-    pub fn link_extension(&self) -> Option<&str> {
-        self.link_extension.as_ref().map(AsRef::as_ref)
+    pub fn link_extension(&self) -> &[LinkExtension] {
+        self.link_extensions.as_slice()
     }
 
-    /// Add a `RelationType` to the `LinkValue`'s `rel` parameter.
+    /// Add a `RelaionType` to the `LinkValue`'s `rel` parameter.
     pub fn push_rel(mut self, rel: RelationType) -> LinkValue {
         let mut v = self.rel.take().unwrap_or(Vec::new());
 
@@ -385,8 +392,8 @@ impl LinkValue {
     }
 
     /// Set `LinkValue`'s `link-extension` parameter.
-    pub fn set_link_extension<T: Into<String>>(mut self, link_extension: T) -> LinkValue {
-        self.link_extension = Some(link_extension.into());
+    pub fn push_link_extension(mut self, link_extension: LinkExtension) -> LinkValue {
+        self.link_extensions.push(link_extension);
 
         self
     }
@@ -408,17 +415,15 @@ impl Header for Link {
         // all the `link-value`s present in each of those `Link` headers.
         raw.iter()
             .map(parsing::from_raw_str::<Link>)
-            .fold(None, |p, c| {
-                match (p, c) {
-                    (None, c) => Some(c),
-                    (e @ Some(Err(_)), _) => e,
-                    (Some(Ok(mut p)), Ok(c)) => {
-                        p.values.extend(c.values);
+            .fold(None, |p, c| match (p, c) {
+                (None, c) => Some(c),
+                (e @ Some(Err(_)), _) => e,
+                (Some(Ok(mut p)), Ok(c)) => {
+                    p.values.extend(c.values);
 
-                        Some(Ok(p))
-                    },
-                    _ => Some(Err(::Error::Header)),
+                    Some(Ok(p))
                 }
+                _ => Some(Err(::Error::Header)),
             })
             .unwrap_or(Err(::Error::Header))
     }
@@ -464,8 +469,11 @@ impl fmt::Display for LinkValue {
         if let Some(ref media_type) = self.media_type {
             try!(write!(f, "; type=\"{}\"", media_type));
         }
-        if let Some(ref link_extension) = self.link_extension {
-            try!(write!(f, "; link-extension={}", link_extension));
+        for extension in self.link_extensions.iter() {
+            try!(write!(f, "; {}", extension.name));
+            if let Some(value) = extension.value.as_ref() {
+                try!(write!(f, "=\"{}\"", value));
+            }
         }
 
         Ok(())
@@ -487,25 +495,23 @@ impl FromStr for Link {
             // Parse the `Target IRI`
             // https://tools.ietf.org/html/rfc5988#section-5.1
             if segment.trim().starts_with('<') {
-                link_values.push(
-                    match verify_and_trim(segment.trim(), (b'<', b'>')) {
-                        Err(_) => return Err(::Error::Header),
-                        Ok(s) => {
-                            LinkValue {
-                                link: s.to_owned().into(),
-                                rel: None,
-                                anchor: None,
-                                rev: None,
-                                href_lang: None,
-                                media_desc: None,
-                                title: None,
-                                title_star: None,
-                                media_type: None,
-                                link_extension: None,
-                            }
-                        },
+                link_values.push(match verify_and_trim(segment.trim(), (b'<', b'>')) {
+                    Err(_) => return Err(::Error::Header),
+                    Ok(s) => {
+                        LinkValue {
+                            link: s.to_owned().into(),
+                            rel: None,
+                            anchor: None,
+                            rev: None,
+                            href_lang: None,
+                            media_desc: None,
+                            title: None,
+                            title_star: None,
+                            media_type: None,
+                            link_extensions: Vec::new(),
+                        }
                     }
-                );
+                });
             } else {
                 // Parse the current link-value's parameters
                 let mut link_param_split = segment.splitn(2, '=');
@@ -526,7 +532,7 @@ impl FromStr for Link {
                     if link_header.rel.is_none() {
                         link_header.rel = match link_param_split.next() {
                             None => return Err(::Error::Header),
-                            Some("") =>  return Err(::Error::Header),
+                            Some("") => return Err(::Error::Header),
                             Some(s) => {
                                 s.trim_matches(|c: char| c == '"' || c.is_whitespace())
                                     .split(' ')
@@ -534,7 +540,7 @@ impl FromStr for Link {
                                     .collect::<Result<Vec<RelationType>, _>>()
                                     .or_else(|_| return Err(::Error::Header))
                                     .ok()
-                            },
+                            }
                         };
                     }
                 } else if "anchor".eq_ignore_ascii_case(link_param_name) {
@@ -542,11 +548,13 @@ impl FromStr for Link {
                     // https://tools.ietf.org/html/rfc5988#section-5.2
                     link_header.anchor = match link_param_split.next() {
                         None => return Err(::Error::Header),
-                        Some("") =>  return Err(::Error::Header),
-                        Some(s) => match verify_and_trim(s.trim(), (b'"', b'"')) {
-                            Err(_) => return Err(::Error::Header),
-                            Ok(a) => Some(String::from(a)),
-                        },
+                        Some("") => return Err(::Error::Header),
+                        Some(s) => {
+                            match verify_and_trim(s.trim(), (b'"', b'"')) {
+                                Err(_) => return Err(::Error::Header),
+                                Ok(a) => Some(String::from(a)),
+                            }
+                        }
                     };
                 } else if "rev".eq_ignore_ascii_case(link_param_name) {
                     // Parse relation type: `rev`.
@@ -554,7 +562,7 @@ impl FromStr for Link {
                     if link_header.rev.is_none() {
                         link_header.rev = match link_param_split.next() {
                             None => return Err(::Error::Header),
-                            Some("") =>  return Err(::Error::Header),
+                            Some("") => return Err(::Error::Header),
                             Some(s) => {
                                 s.trim_matches(|c: char| c == '"' || c.is_whitespace())
                                     .split(' ')
@@ -562,7 +570,7 @@ impl FromStr for Link {
                                     .collect::<Result<Vec<RelationType>, _>>()
                                     .or_else(|_| return Err(::Error::Header))
                                     .ok()
-                            },
+                            }
                         }
                     }
                 } else if "hreflang".eq_ignore_ascii_case(link_param_name) {
@@ -570,16 +578,16 @@ impl FromStr for Link {
                     // https://tools.ietf.org/html/rfc5988#section-5.4
                     let mut v = link_header.href_lang.take().unwrap_or(Vec::new());
 
-                    v.push(
-                        match link_param_split.next() {
-                            None => return Err(::Error::Header),
-                            Some("") =>  return Err(::Error::Header),
-                            Some(s) => match s.trim().parse() {
+                    v.push(match link_param_split.next() {
+                        None => return Err(::Error::Header),
+                        Some("") => return Err(::Error::Header),
+                        Some(s) => {
+                            match s.trim().parse() {
                                 Err(_) => return Err(::Error::Header),
                                 Ok(t) => t,
-                            },
+                            }
                         }
-                    );
+                    });
 
                     link_header.href_lang = Some(v);
                 } else if "media".eq_ignore_ascii_case(link_param_name) {
@@ -588,7 +596,7 @@ impl FromStr for Link {
                     if link_header.media_desc.is_none() {
                         link_header.media_desc = match link_param_split.next() {
                             None => return Err(::Error::Header),
-                            Some("") =>  return Err(::Error::Header),
+                            Some("") => return Err(::Error::Header),
                             Some(s) => {
                                 s.trim_matches(|c: char| c == '"' || c.is_whitespace())
                                     .split(',')
@@ -596,7 +604,7 @@ impl FromStr for Link {
                                     .collect::<Result<Vec<MediaDesc>, _>>()
                                     .or_else(|_| return Err(::Error::Header))
                                     .ok()
-                            },
+                            }
                         };
                     }
                 } else if "title".eq_ignore_ascii_case(link_param_name) {
@@ -605,11 +613,13 @@ impl FromStr for Link {
                     if link_header.title.is_none() {
                         link_header.title = match link_param_split.next() {
                             None => return Err(::Error::Header),
-                            Some("") =>  return Err(::Error::Header),
-                            Some(s) => match verify_and_trim(s.trim(), (b'"', b'"')) {
-                                Err(_) => return Err(::Error::Header),
-                                Ok(t) => Some(String::from(t)),
-                            },
+                            Some("") => return Err(::Error::Header),
+                            Some(s) => {
+                                match verify_and_trim(s.trim(), (b'"', b'"')) {
+                                    Err(_) => return Err(::Error::Header),
+                                    Ok(t) => Some(String::from(t)),
+                                }
+                            }
                         };
                     }
                 } else if "title*".eq_ignore_ascii_case(link_param_name) {
@@ -621,7 +631,7 @@ impl FromStr for Link {
                     if link_header.title_star.is_none() {
                         link_header.title_star = match link_param_split.next() {
                             None => return Err(::Error::Header),
-                            Some("") =>  return Err(::Error::Header),
+                            Some("") => return Err(::Error::Header),
                             Some(s) => Some(String::from(s.trim())),
                         };
                     }
@@ -631,27 +641,32 @@ impl FromStr for Link {
                     if link_header.media_type.is_none() {
                         link_header.media_type = match link_param_split.next() {
                             None => return Err(::Error::Header),
-                            Some("") =>  return Err(::Error::Header),
-                            Some(s) => match verify_and_trim(s.trim(), (b'"', b'"')) {
-                                Err(_) => return Err(::Error::Header),
-                                Ok(t) => match t.parse() {
+                            Some("") => return Err(::Error::Header),
+                            Some(s) => {
+                                match verify_and_trim(s.trim(), (b'"', b'"')) {
                                     Err(_) => return Err(::Error::Header),
-                                    Ok(m) => Some(m),
-                                },
-                            },
+                                    Ok(t) => {
+                                        match t.parse() {
+                                            Err(_) => return Err(::Error::Header),
+                                            Ok(m) => Some(m),
+                                        }
+                                    }
+                                }
+                            }
 
                         };
                     }
-                } else if "link-extension".eq_ignore_ascii_case(link_param_name) {
+                } else if link_param_name.len() > 0 {
                     // Parse target attribute: `link-extension`.
                     // https://tools.ietf.org/html/rfc5988#section-5.4
-                    if link_header.link_extension.is_none() {
-                        link_header.link_extension = match link_param_split.next() {
-                            None => return Err(::Error::Header),
-                            Some("") =>  return Err(::Error::Header),
-                            Some(s) => Some(String::from(s.trim())),
-                        };
-                    }
+                    link_header.link_extensions.push(LinkExtension {
+                        name: link_param_name.to_string(),
+                        value: match link_param_split.next() {
+                            None => None,
+                            Some("") => return Err(::Error::Header),
+                            Some(s) => Some(String::from(s.trim())), 
+                        },
+                    })
                 } else {
                     return Err(::Error::Header);
                 }
@@ -675,7 +690,7 @@ impl fmt::Display for MediaDesc {
             MediaDesc::Aural => write!(f, "aural"),
             MediaDesc::All => write!(f, "all"),
             MediaDesc::Extension(ref other) => write!(f, "{}", other),
-         }
+        }
     }
 }
 
@@ -693,7 +708,7 @@ impl FromStr for MediaDesc {
             "braille" => Ok(MediaDesc::Braille),
             "aural" => Ok(MediaDesc::Aural),
             "all" => Ok(MediaDesc::All),
-             _ => Ok(MediaDesc::Extension(String::from(s))),
+            _ => Ok(MediaDesc::Extension(String::from(s))),
         }
     }
 }
@@ -742,7 +757,7 @@ impl fmt::Display for RelationType {
             RelationType::WorkingCopy => write!(f, "working-copy"),
             RelationType::WorkingCopyOf => write!(f, "working-copy-of"),
             RelationType::ExtRelType(ref uri) => write!(f, "{}", uri),
-         }
+        }
     }
 }
 
@@ -843,12 +858,12 @@ impl FromStr for RelationType {
 struct SplitAsciiUnquoted<'a> {
     src: &'a str,
     pos: usize,
-    del: &'a str
+    del: &'a str,
 }
 
 impl<'a> SplitAsciiUnquoted<'a> {
     fn new(s: &'a str, d: &'a str) -> SplitAsciiUnquoted<'a> {
-        SplitAsciiUnquoted{
+        SplitAsciiUnquoted {
             src: s,
             pos: 0,
             del: d,
@@ -886,7 +901,11 @@ impl<'a> Iterator for SplitAsciiUnquoted<'a> {
     }
 }
 
-fn fmt_delimited<T: fmt::Display>(f: &mut fmt::Formatter, p: &[T], d: &str, b: (&str, &str)) -> fmt::Result {
+fn fmt_delimited<T: fmt::Display>(f: &mut fmt::Formatter,
+                                  p: &[T],
+                                  d: &str,
+                                  b: (&str, &str))
+                                  -> fmt::Result {
     if p.len() != 0 {
         // Write a starting string `b.0` before the first element
         try!(write!(f, "{}{}", b.0, p[0]));
@@ -910,9 +929,7 @@ fn verify_and_trim(s: &str, b: (u8, u8)) -> ::Result<&str> {
     // Verify that `s` starts with `b.0` and ends with `b.1` and return
     // the contained substring after triming whitespace.
     if length > 1 && b.0 == byte_array[0] && b.1 == byte_array[length - 1] {
-        Ok(s.trim_matches(
-            |c: char| c == b.0 as char || c == b.1 as char || c.is_whitespace())
-        )
+        Ok(s.trim_matches(|c: char| c == b.0 as char || c == b.1 as char || c.is_whitespace()))
     } else {
         Err(::Error::Header)
     }
@@ -927,7 +944,7 @@ mod tests {
     use std::fmt;
     use std::fmt::Write;
 
-    use super::{Link, LinkValue, MediaDesc, RelationType, SplitAsciiUnquoted};
+    use super::{Link, LinkValue, MediaDesc, RelationType, SplitAsciiUnquoted, LinkExtension};
     use super::{fmt_delimited, verify_and_trim};
 
     use header::Header;
@@ -987,7 +1004,10 @@ mod tests {
             .set_title("previous chapter")
             .set_title_star("title* unparsed")
             .set_media_type(Mime(Text, Plain, vec![]))
-            .set_link_extension("link-extension unparsed");
+            .push_link_extension(LinkExtension {
+                name: "user".to_string(),
+                value: Some("hyper".to_string()),
+            });
 
         let link_header = b"<http://example.com/TheBook/chapter2>; \
             rel=\"previous\"; anchor=\"../anchor/example/\"; \
@@ -1027,7 +1047,8 @@ mod tests {
                                   Access-Control-Allow-Credentials: None\r\nLink: \
                                   <http://example.com/TheBook/chapter2>; \
                                   rel=\"previous\"; rev=next; title=\"previous chapter\"\
-                                  \r\n\r\n".to_vec());
+                                  \r\n\r\n"
+            .to_vec());
 
         let (mut res, _) = ServerTransaction::parse(&mut raw).unwrap().unwrap();
 
@@ -1047,25 +1068,27 @@ mod tests {
             .set_title("previous chapter")
             .set_title_star("title* unparsed")
             .set_media_type(Mime(Text, Plain, vec![]))
-            .set_link_extension("link-extension unparsed");
+            .push_link_extension(LinkExtension {
+                name: "user".to_string(),
+                value: Some("hyper".to_string()),
+            });
 
         let link = Link::new(vec![link_value]);
 
         let mut link_header = String::new();
         write!(&mut link_header, "{}", link).unwrap();
 
-        let expected_link_header = "<http://example.com/TheBook/chapter2>; \
-            rel=\"previous\"; anchor=\"/anchor/example/\"; \
-            rev=\"next\"; hreflang=de; media=\"screen\"; \
-            title=\"previous chapter\"; title*=title* unparsed; \
-            type=\"text/plain\"; link-extension=link-extension unparsed";
+        let expected_link_header = "<http://example.com/TheBook/chapter2>; rel=\"previous\"; \
+                                    anchor=\"/anchor/example/\"; rev=\"next\"; hreflang=de; \
+                                    media=\"screen\"; title=\"previous chapter\"; title*=title* \
+                                    unparsed; type=\"text/plain\"; user=hyper";
 
         assert_eq!(link_header, expected_link_header);
     }
 
     #[test]
     fn test_link_parsing_errors() {
-        let link_a  = b"http://example.com/TheBook/chapter2; \
+        let link_a = b"http://example.com/TheBook/chapter2; \
             rel=\"previous\"; rev=next; title=\"previous chapter\"";
 
         let mut err: Result<Link, _> = Header::parse_header(&vec![link_a.to_vec()].into());
@@ -1094,7 +1117,7 @@ mod tests {
 
         err = Header::parse_header(&vec![link_e.to_vec()].into());
         assert_eq!(err.is_err(), true);
-     }
+    }
 
     #[test]
     fn test_link_split_ascii_unquoted_iterator() {
@@ -1110,7 +1133,9 @@ mod tests {
 
     #[test]
     fn test_link_fmt_delimited() {
-        struct TestFormatterStruct<'a> { v: Vec<&'a str> };
+        struct TestFormatterStruct<'a> {
+            v: Vec<&'a str>,
+        };
 
         impl<'a> fmt::Display for TestFormatterStruct<'a> {
             fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -1138,4 +1163,6 @@ mod tests {
     }
 }
 
-bench_header!(bench_link, Link, { vec![b"<http://example.com/TheBook/chapter2>; rel=\"previous\"; rev=next; title=\"previous chapter\"; type=\"text/html\"; media=\"screen, tty\"".to_vec()] });
+bench_header!(bench_link, Link, {
+    vec![b"<http://example.com/TheBook/chapter2>; rel=\"previous\"; rev=next; title=\"previous chapter\"; type=\"text/html\"; media=\"screen, tty\"".to_vec()]
+});
